@@ -7,4 +7,17 @@ public class Config {
 
     };
 
+
+    //ENCODER
+    public static final int encoder_count = 2;
+
+    //số tick mỗi vòng quay của encoder
+    public static final double TICKS_PER_REVOL = 2000;
+
+    //đường kính bánh xe encoder
+    public static final double C = 10;
+    public static final String encoders[] = {
+            "", ""
+    };
+
 }
