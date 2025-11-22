@@ -17,7 +17,14 @@ public class Config {
     //đường kính bánh xe encoder
     public static final double C = 10;
     public static final String encoders[] = {
-            "", ""
+            "x_pod", "y_pod"
     };
+
+    //CAMERA
+
+    public static final double fx = 578.272;
+    public static final double fy = 578.272;
+    public static final double cx = 402.145;
+    public static final double cy = 221.506;
 
 }
