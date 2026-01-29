@@ -1,9 +1,11 @@
 # UDP config - Java (robot) sends TO receiver_host:udp_port; Python (laptop) listens on udp_port
 # When laptop connects to robot WiFi/AP, set receiver_host to laptop's IP (e.g. 192.168.49.2)
-receiver_host=192.168.49.1
+receiver_host=192.168.43.116
 udp_port=5000
 # Python receiver: bind address (0.0.0.0 = all interfaces)
 bind_address=0.0.0.0
+# Python: ghi log ra file udp_receiver.log (true/false)
+# log_to_file=false
 # Camera JPEG size/quality to fit one UDP packet (< 65500 bytes)
 camera_width=320
 camera_height=240

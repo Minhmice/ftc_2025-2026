@@ -200,14 +200,15 @@ public class Main extends LinearOpMode implements KickStateSetter {
     private String buildTelemetryString() {
         int[] slots = artifactProcessing.getArtifactSlots();
         int[] queue = artifactProcessing.getArtifactQueue();
+        String senderIp = (udpLogger != null) ? udpLogger.getSenderIp() : "N/A";
         return String.format(
-                "AutoAngle: %s\nAnglePos: %.3f\nTagDetected: %s\nTagRange(in): %.1f\nFlywheel: %s\nYaw (deg): %.1f\nX (cm): %.2f\nY (cm): %.2f\nSlots [0,1,2]: %d %d %d\nQueue [0,1,2]: %d %d %d\nShootState: %s",
+                "AutoAngle: %s\nAnglePos: %.3f\nTagDetected: %s\nTagRange(in): %.1f\nFlywheel: %s\nYaw (deg): %.1f\nX (cm): %.2f\nY (cm): %.2f\nSlots [0,1,2]: %d %d %d\nQueue [0,1,2]: %d %d %d\nShootState: %s\nUDP sender IP: %s",
                 shooter.isAutoAngleEnabled(), shooting_angle, tagProcessing.isDetected(),
                 tagProcessing.getRangeInches(), shooter_active ? "ON" : "OFF",
                 robot.imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES),
                 odometry.getX(), odometry.getY(),
                 slots[0], slots[1], slots[2], queue[0], queue[1], queue[2],
-                shootCoordinator.getShootStateLabel(artifactProcessing.is_ready_to_kick()));
+                shootCoordinator.getShootStateLabel(artifactProcessing.is_ready_to_kick()), senderIp);
     }
 
     private void updateTelemetry() {
@@ -226,6 +227,9 @@ public class Main extends LinearOpMode implements KickStateSetter {
         telemetry.addData("Queue [0,1,2]", "%d %d %d", queue[0], queue[1], queue[2]);
         telemetry.addData("ShootState",
                 shootCoordinator.getShootStateLabel(artifactProcessing.is_ready_to_kick()));
+        if (udpLogger != null) {
+            telemetry.addData("UDP sender IP", udpLogger.getSenderIp());
+        }
         telemetry.update();
     }
 }

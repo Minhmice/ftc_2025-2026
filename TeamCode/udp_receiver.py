@@ -2,14 +2,15 @@
 """
 Nhận UDP log (type 0x00) và video JPEG (type 0x01) từ robot FTC.
 Hai cửa sổ: UDP Video + Log; log in ra console.
+Tự động ghi nhận sender (IP:port) từ gói nhận được.
 Đọc config từ udp_config.txt (cùng thư mục).
 """
 
 import socket
 import threading
-import time
 import os
 import sys
+import logging
 
 import cv2
 import numpy as np
@@ -25,9 +26,20 @@ FONT_SCALE = 0.45
 FONT_THICKNESS = 1
 
 
+def setup_logging(log_to_file=False):
+    """Cấu hình logging: console + tùy chọn file."""
+    log_format = "%(asctime)s [%(levelname)s] %(message)s"
+    date_fmt = "%H:%M:%S"
+    handlers = [logging.StreamHandler(sys.stdout)]
+    if log_to_file:
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "udp_receiver.log")
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+    logging.basicConfig(level=logging.INFO, format=log_format, datefmt=date_fmt, handlers=handlers)
+
+
 def load_config():
-    """Parse udp_config.txt (key=value). Return dict with udp_port, bind_address."""
-    config = {"udp_port": 5000, "bind_address": "0.0.0.0"}
+    """Parse udp_config.txt. Return dict: udp_port, bind_address, log_to_file."""
+    config = {"udp_port": 5000, "bind_address": "0.0.0.0", "log_to_file": False}
     if not os.path.isfile(CONFIG_PATH):
         return config
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -46,6 +58,8 @@ def load_config():
                         pass
                 elif key == "bind_address":
                     config["bind_address"] = value
+                elif key == "log_to_file":
+                    config["log_to_file"] = value.lower() in ("1", "true", "yes")
     return config
 
 
@@ -54,23 +68,35 @@ def run_receiver(port, bind_address):
     log_lock = threading.Lock()
     current_frame = None
     frame_lock = threading.Lock()
+    senders = set()  # (ip, port) đã gửi tới
+    sender_lock = threading.Lock()
+    last_sender_str = [""]  # [0] = "IP:port" gửi gần nhất (để hiển thị)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((bind_address, port))
     sock.settimeout(0.5)
+    logging.info("Socket bound %s:%s", bind_address, port)
 
     def recv_loop():
         nonlocal current_frame
         while True:
             try:
-                data, _ = sock.recvfrom(65535)
+                data, addr = sock.recvfrom(65535)
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as e:
+                logging.warning("Socket error: %s", e)
                 break
             if len(data) < 1:
                 continue
+            ip, port_s = addr[0], addr[1]
+            with sender_lock:
+                key = (ip, port_s)
+                if key not in senders:
+                    senders.add(key)
+                    logging.info("Sender detected: %s:%s", ip, port_s)
+                last_sender_str[0] = f"{ip}:{port_s}"
             msg_type = data[0]
             payload = data[1:]
             if msg_type == TYPE_LOG:
@@ -85,6 +111,7 @@ def run_receiver(port, bind_address):
                             log_lines.append(line)
                             if len(log_lines) > MAX_LOG_LINES:
                                 log_lines.pop(0)
+                logging.debug("Log from %s: %s", last_sender_str[0], text[:80])
                 print(text)
             elif msg_type == TYPE_JPEG:
                 try:
@@ -93,8 +120,8 @@ def run_receiver(port, bind_address):
                     if img is not None:
                         with frame_lock:
                             current_frame = img
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.debug("JPEG decode error: %s", e)
 
     recv_thread = threading.Thread(target=recv_loop, daemon=True)
     recv_thread.start()
@@ -120,9 +147,17 @@ def run_receiver(port, bind_address):
 
             with log_lock:
                 lines = list(log_lines)
+            with sender_lock:
+                sender_label = last_sender_str[0] or "No sender yet"
+                senders_count = len(senders)
             log_img = np.ones((LOG_WINDOW_HEIGHT, LOG_WINDOW_WIDTH, 3), dtype=np.uint8)
             log_img[:] = (250, 250, 250)
             y = 24
+            cv2.putText(log_img, f"From: {sender_label}", (8, y), FONT, FONT_SCALE, (0, 100, 0), FONT_THICKNESS)
+            y += 20
+            if senders_count > 1:
+                cv2.putText(log_img, f"Senders: {senders_count}", (8, y), FONT, FONT_SCALE * 0.9, (80, 80, 80), FONT_THICKNESS)
+                y += 18
             for line in lines[-MAX_LOG_LINES:]:
                 if y + 20 > LOG_WINDOW_HEIGHT:
                     break
@@ -138,14 +173,16 @@ def run_receiver(port, bind_address):
     finally:
         sock.close()
         cv2.destroyAllWindows()
+        logging.info("Receiver stopped.")
 
 
 def main():
     config = load_config()
+    setup_logging(config.get("log_to_file", False))
     port = config["udp_port"]
     bind_address = config["bind_address"]
-    print(f"UDP receiver: bind {bind_address}:{port}")
-    print("Two windows: UDP Video, UDP Log. Console = log. ESC to exit.")
+    logging.info("UDP receiver: bind %s:%s", bind_address, port)
+    logging.info("Two windows: UDP Video, UDP Log. ESC to exit. Sender range auto-detected.")
     run_receiver(port, bind_address)
 
 
