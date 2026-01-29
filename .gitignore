@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Gradle
+.gradle/
+**/build/
+
+# Local config (machine-specific paths)
+local.properties

@@ -12,7 +12,7 @@ import com.qualcomm.robotcore.util.ElapsedTime;
  */
 public class Shooter {
     private final RobotHardware robot;
-    private final Main main;
+    private final KickStateSetter kickStateSetter;
     private final DcMotorEx flywheel;
 
     // ---------------- KICKER ----------------
@@ -64,12 +64,12 @@ public class Shooter {
     // If camera is not aligned with shooter pivot, offset range a bit (inches).
     private static final double RANGE_OFFSET_IN = 0.0;
 
-    public Shooter(RobotHardware robot, Main main) {
+    public Shooter(RobotHardware robot, KickStateSetter kickStateSetter) {
         this.robot = robot;
-        this.main = main;
+        this.kickStateSetter = kickStateSetter;
 
         robot.kicking_servo.setPosition(REST_POS);
-        main.kick = false;
+        if (kickStateSetter != null) kickStateSetter.setKick(false);
 
         this.flywheel = robot.motor_shooter; // DcMotorEx in RobotHardware
         flywheel.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
@@ -140,7 +140,7 @@ public class Shooter {
         kicking = true;
         timer.reset();
         robot.kicking_servo.setPosition(KICK_POS);
-        main.kick = true;
+        if (kickStateSetter != null) kickStateSetter.setKick(true);
     }
 
     /** Call every loop to complete kick timing. */
@@ -149,7 +149,7 @@ public class Shooter {
 
         if (timer.milliseconds() >= KICK_HOLD_MS) {
             robot.kicking_servo.setPosition(REST_POS);
-            main.kick = false;
+            if (kickStateSetter != null) kickStateSetter.setKick(false);
             kicking = false;
         }
     }

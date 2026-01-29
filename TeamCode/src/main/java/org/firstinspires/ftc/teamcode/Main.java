@@ -5,45 +5,87 @@ import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
+/**
+ * Main TeleOp – điều khiển robot FTC trong chế độ lái tay.
+ * Tích hợp: di chuyển, turret, intake/artifact, shooter (flywheel + kick), vision (AprilTag).
+ *
+ * Mapping nút (gamepad1 = lái, gamepad2 = phụ):
+ * - Drive: gamepad1 left/right stick
+ * - Intake: Circle = chạy collector, Square = dừng
+ * - Flywheel: LB = bật, RB = tắt
+ * - Bắn: Triangle = bắt đầu chuỗi bắn
+ * - Góc bắn: Y = +trim, A = -trim, Back = bật/tắt auto-angle theo AprilTag
+ */
 @TeleOp(name = "TELEOP")
-public class Main extends LinearOpMode {
+public class Main extends LinearOpMode implements KickStateSetter {
 
     // ================== SHOOTER STATE ==================
+    /** Cờ yêu cầu kick (đẩy pixel vào flywheel). */
     public boolean kick;
+
+    @Override
+    public void setKick(boolean value) { kick = value; }
+    /** Bật/tắt flywheel (LB = bật, RB = tắt). */
     public boolean shooter_active = false;
 
-    // giữ để telemetry/debug (servo angle thực tế)
+    /** Góc servo bắn thực tế – dùng cho telemetry/debug. */
     public double shooting_angle = 0;
 
-    // luôn 90% – KHÔNG chỉnh bằng dpad nữa
+    /** Công suất flywheel cố định 90% – không chỉnh bằng dpad. */
     public static final double SHOOTER_POWER_FIXED = 0.90;
 
-    // Auto-angle controls (edge-trigger)
+    /** Giá trị mặc định team_color (1 hoặc 2 theo đội) – dùng cho vision/tag. */
+    private static final int TEAM_COLOR_DEFAULT = 1;
+
+    /** Tốc độ tối đa drive (0.25 = 25%). */
+    private static final double DEFAULT_MAX_SPEED = 0.25;
+    /** Deadzone joystick (0.1 = 10%). */
+    private static final double DEFAULT_DEADZONE = 0.1;
+
+    /** Trạng thái nút trước đó – dùng edge-trigger (chỉ xử lý khi nhấn lần đầu). */
     private boolean lastY = false;
     private boolean lastA = false;
     private boolean lastBack = false;
 
-    // ================== SYSTEM ==================
-    public int team_color;
+    // ================== SYSTEM COMPONENTS ==================
+    /** Màu đội (dùng cho vision/tag). Red=1, Blue=2; subclass set trước super.runOpMode(). */
+    public int team_color = TEAM_COLOR_DEFAULT;
+    /** Truy cập phần cứng (motor, servo, IMU, ...). */
     RobotHardware robot;
+    /** Đọc cảm biến (khoảng cách, limit, ...). */
     SensorManager sensorManager;
+    /** Di chuyển (drive) theo gamepad1. */
     Movement movement;
+    /** Đọc và lưu trạng thái gamepad1/gamepad2. */
     GamepadController gamepadController;
+    /** Xử lý thu thập/đẩy artifact (intake, queue, kick prep). */
     ArtifactProcessing artifactProcessing;
+    /** Điều khiển turret (xoay theo tag hoặc tay). */
     Turret turret;
+    /** Nhận diện AprilTag và khoảng cách (phục vụ góc bắn). */
     TagProcessing tagProcessing;
+    /** Ước lượng vị trí robot (x, y) từ encoder/IMU. */
     Odometry odometry;
+    /** Flywheel + servo góc + kick + auto-angle. */
     Shooter shooter;
+    /** Điều phối chuỗi bắn (Triangle -> pre_shoot -> kick -> post_shoot). */
+    ShootCoordinator shootCoordinator;
 
-    // Shoot sequence flags
-    private boolean inshoot = false;
-    private boolean lastTriangle = false;
-    private boolean kickStarted = false;
+    /** UDP: gửi log + camera tới laptop (khi udp_config.txt hợp lệ). */
+    private UdpConfig udpConfig;
+    private UdpLogger udpLogger;
+    private FrameCaptureProcessor frameCaptureProcessor;
 
     @Override
     public void runOpMode() throws InterruptedException {
 
+        // ---------- INIT: khởi tạo phần cứng và các module ----------
         robot = new RobotHardware(hardwareMap);
+        udpConfig = new UdpConfig(UdpConfig.DEFAULT_PATH);
+        if (udpConfig.isValid()) {
+            frameCaptureProcessor = new FrameCaptureProcessor(udpConfig);
+            robot.setFrameCaptureProcessor(frameCaptureProcessor);
+        }
         robot.init();
 
         sensorManager = new SensorManager(robot);
@@ -53,23 +95,30 @@ public class Main extends LinearOpMode {
         tagProcessing = new TagProcessing(robot);
         turret = new Turret(robot, sensorManager, gamepadController, this);
         odometry = new Odometry(robot, 0, 0);
-        shooter = new Shooter(robot, this);
+        shooter = new Shooter(robot, (KickStateSetter) this);
+        shootCoordinator = new ShootCoordinator(artifactProcessing, shooter);
 
         waitForStart();
 
-        movement.setMaxSpeed(0.25);
-        movement.setDeadzone(0.1);
+        if (udpConfig != null && udpConfig.isValid()) {
+            udpLogger = new UdpLogger(udpConfig);
+            udpLogger.start();
+        }
 
+        movement.setMaxSpeed(DEFAULT_MAX_SPEED);
+        movement.setDeadzone(DEFAULT_DEADZONE);
+
+        // ---------- MAIN LOOP: chạy mỗi vòng lặp khi OpMode đang chạy ----------
         while (opModeIsActive()) {
 
-            // ================== INPUT ==================
+            // ---------- INPUT: đọc và lưu trạng thái gamepad ----------
             gamepadController.update_gamepad();
 
-            // ================== VISION ==================
+            // ---------- VISION: cập nhật phát hiện AprilTag và khoảng cách ----------
             tagProcessing.update(team_color);
 
-            // ================== AUTO SHOOTING ANGLE ==================
-            // Y / A: trim nhỏ (edge-trigger)
+            // ---------- AUTO SHOOTING ANGLE (gamepad2) ----------
+            // Y: tăng trim góc (+0.01), A: giảm trim (-0.01) – chỉ khi nhấn lần đầu (edge-trigger)
             boolean y = gamepad2.y;
             boolean a = gamepad2.a;
 
@@ -79,25 +128,26 @@ public class Main extends LinearOpMode {
             lastY = y;
             lastA = a;
 
-            // BACK: bật / tắt auto-angle
+            // Back: bật/tắt chế độ auto-angle (góc bắn theo khoảng cách tag)
             boolean back = gamepad2.back;
             if (back && !lastBack) {
                 shooter.setAutoAngleEnabled(!shooter.isAutoAngleEnabled());
             }
             lastBack = back;
 
-            // Cập nhật góc bắn theo range AprilTag
+            // Tính và set góc servo bắn dựa trên khoảng cách AprilTag (nếu auto-angle bật)
             shooter.updateAutoAngle(tagProcessing);
 
+            // Lấy góc servo thực tế cho telemetry
             shooting_angle = robot.angle_servo.getPosition();
 
-            // ================== ARTIFACT ==================
+            // ---------- ARTIFACT: cập nhật queue, trạng thái slot, chuẩn bị kick ----------
             artifactProcessing.update();
 
-            // ================== DRIVE ==================
+            // ---------- DRIVE: di chuyển robot theo gamepad1 ----------
             movement.move_robot();
 
-            // ================== ODOMETRY ==================
+            // ---------- ODOMETRY: cập nhật vị trí (x, y) từ encoder + IMU ----------
             odometry.setDriveCommand(
                     movement.getCmdForward(),
                     movement.getCmdStrafe(),
@@ -105,17 +155,17 @@ public class Main extends LinearOpMode {
             );
             odometry.update();
 
-            // ================== TURRET ==================
+            // ---------- TURRET: xoay turret theo tag hoặc điều khiển tay ----------
             turret.update();
 
-            // ================== INTAKE ==================
+            // ---------- INTAKE: Circle = chạy collector, Square = dừng ----------
             if (gamepad2.circle) {
-                artifactProcessing.run_collecter();
+                artifactProcessing.run_collector();
             } else if (gamepad2.square) {
-                artifactProcessing.stop_collecter();
+                artifactProcessing.stop_collector();
             }
 
-            // ================== FLYWHEEL ==================
+            // ---------- FLYWHEEL: LB = bật, RB = tắt; khi bật chạy ở 90% (ổn định pin) ----------
             if (gamepad2.left_bumper) {
                 shooter_active = true;
             } else if (gamepad2.right_bumper) {
@@ -123,70 +173,59 @@ public class Main extends LinearOpMode {
             }
 
             if (shooter_active) {
-                // velocity-hold 90% (ổn định dù pin yếu)
                 shooter.run_flywheel_motor();
             } else {
                 shooter.stop_flywheel_motor();
             }
 
-            // ================== SHOOT SEQUENCE ==================
-            boolean triangle = gamepad2.triangle;
-            if (triangle && !lastTriangle) {
-                inshoot = true;
-                kickStarted = false;
-                artifactProcessing.start_pre_shoot();
+            // ---------- SHOOT SEQUENCE: Triangle bắt đầu chuỗi bắn ----------
+            shootCoordinator.update(gamepad2.triangle);
+
+            // ---------- TELEMETRY: hiển thị trạng thái lên Driver Station ----------
+            updateTelemetry();
+
+            // ---------- UDP: gửi log + frame tới laptop ----------
+            if (udpLogger != null) {
+                udpLogger.pushLog(buildTelemetryString());
+                if (frameCaptureProcessor != null) {
+                    byte[] jpeg = frameCaptureProcessor.getLastJpeg();
+                    if (jpeg != null) udpLogger.pushJpeg(jpeg);
+                }
             }
-            lastTriangle = triangle;
-
-            if (inshoot) {
-                if (artifactProcessing.is_ready_to_kick()) {
-                    shooter.request_kick();
-                }
-
-                shooter.update();
-
-                if (shooter.isKicking()) {
-                    kickStarted = true;
-                }
-
-                if (kickStarted && !shooter.isKicking()) {
-                    artifactProcessing.request_post_shoot();
-                    inshoot = false;
-                    kickStarted = false;
-                }
-            } else {
-                shooter.update();
-            }
-
-            // ================== TELEMETRY ==================
-            telemetry.addData("AutoAngle", shooter.isAutoAngleEnabled());
-            telemetry.addData("AnglePos", "%.3f", shooting_angle);
-            telemetry.addData("TagDetected", tagProcessing.isDetected());
-            telemetry.addData("TagRange(in)", "%.1f", tagProcessing.getRangeInches());
-
-            telemetry.addData("Flywheel", shooter_active ? "ON" : "OFF");
-
-            telemetry.addData("Yaw (deg)",
-                    robot.imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES));
-            telemetry.addData("X (cm)", "%.2f", odometry.getX());
-            telemetry.addData("Y (cm)", "%.2f", odometry.getY());
-
-            telemetry.addData("Slots [0,1,2]", "%d %d %d",
-                    artifactProcessing.artifact_slots[0],
-                    artifactProcessing.artifact_slots[1],
-                    artifactProcessing.artifact_slots[2]);
-
-            telemetry.addData("Queue [0,1,2]", "%d %d %d",
-                    artifactProcessing.artifact_queue[0],
-                    artifactProcessing.artifact_queue[1],
-                    artifactProcessing.artifact_queue[2]);
-
-            telemetry.addData("ShootState",
-                    artifactProcessing.is_ready_to_kick()
-                            ? "READY"
-                            : (inshoot ? "PREP" : "IDLE"));
-
-            telemetry.update();
         }
+        if (udpLogger != null) udpLogger.stop();
+    }
+
+    /** Chuỗi telemetry (cùng nội dung updateTelemetry) để gửi UDP. */
+    private String buildTelemetryString() {
+        int[] slots = artifactProcessing.getArtifactSlots();
+        int[] queue = artifactProcessing.getArtifactQueue();
+        return String.format(
+                "AutoAngle: %s\nAnglePos: %.3f\nTagDetected: %s\nTagRange(in): %.1f\nFlywheel: %s\nYaw (deg): %.1f\nX (cm): %.2f\nY (cm): %.2f\nSlots [0,1,2]: %d %d %d\nQueue [0,1,2]: %d %d %d\nShootState: %s",
+                shooter.isAutoAngleEnabled(), shooting_angle, tagProcessing.isDetected(),
+                tagProcessing.getRangeInches(), shooter_active ? "ON" : "OFF",
+                robot.imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES),
+                odometry.getX(), odometry.getY(),
+                slots[0], slots[1], slots[2], queue[0], queue[1], queue[2],
+                shootCoordinator.getShootStateLabel(artifactProcessing.is_ready_to_kick()));
+    }
+
+    private void updateTelemetry() {
+        telemetry.addData("AutoAngle", shooter.isAutoAngleEnabled());
+        telemetry.addData("AnglePos", "%.3f", shooting_angle);
+        telemetry.addData("TagDetected", tagProcessing.isDetected());
+        telemetry.addData("TagRange(in)", "%.1f", tagProcessing.getRangeInches());
+        telemetry.addData("Flywheel", shooter_active ? "ON" : "OFF");
+        telemetry.addData("Yaw (deg)",
+                robot.imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES));
+        telemetry.addData("X (cm)", "%.2f", odometry.getX());
+        telemetry.addData("Y (cm)", "%.2f", odometry.getY());
+        int[] slots = artifactProcessing.getArtifactSlots();
+        telemetry.addData("Slots [0,1,2]", "%d %d %d", slots[0], slots[1], slots[2]);
+        int[] queue = artifactProcessing.getArtifactQueue();
+        telemetry.addData("Queue [0,1,2]", "%d %d %d", queue[0], queue[1], queue[2]);
+        telemetry.addData("ShootState",
+                shootCoordinator.getShootStateLabel(artifactProcessing.is_ready_to_kick()));
+        telemetry.update();
     }
 }

@@ -20,8 +20,8 @@ public class Turret {
     private final Main main;
 
     // ===== TUNING =====
-    // Auto aiming: proportional correction based on tag pixel offset
-    private static final double AUTO_GAIN = 0.7;
+    // Auto aiming: proportional correction based on tag pixel offset (higher = turret turns faster)
+    private static final double AUTO_GAIN = 1.0;
 
     // Manual stick deadzone
     private static final double MANUAL_DEADZONE = 0.10;
@@ -32,9 +32,8 @@ public class Turret {
     // Limit max speed so turret doesn't slam endstops too hard
     private static final double MAX_CMD = 0.85;
 
-    // Rate limit to smooth command changes (per update call)
-    // Example: 0.08 means command can change max 0.08 each loop
-    private static final double CMD_RAMP_STEP = 0.08;
+    // Rate limit: larger step = turret catches up to tag faster at ~30 FPS
+    private static final double CMD_RAMP_STEP = 0.18;
 
     // Servo neutral stop position for continuous rotation
     private static final double SERVO_NEUTRAL = 0.5;

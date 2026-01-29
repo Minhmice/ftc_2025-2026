@@ -10,22 +10,25 @@ public class TagProcessing {
     private double range;
     private double distanceToCenter = -1;
 
-    // VisionPortal defaults to 640x480 in easyCreateWithDefaults(); half-width = 320px.
-    // (Adjust if you explicitly change camera resolution.)
+    // VisionPortal defaults to 640x480; half-width = 320px
     private static final double IMAGE_HALF_WIDTH_PX = 320.0;
+
+    /** AprilTag ID cho đội đỏ (team_color == 1). */
+    private static final int TAG_ID_RED = 24;
+    /** AprilTag ID cho đội xanh (team_color == 2). */
+    private static final int TAG_ID_BLUE = 20;
 
     public TagProcessing(RobotHardware robot) {
         this.robot = robot;
     }
 
-    // 1 : red team
-    // 2 : blue team
+    /** team_color: 1 = red, 2 = blue. */
     public void update(int team_color) {
         this.detected = false;
 
         List<AprilTagDetection> tags = robot.april_tag.getDetections();
         if (tags != null && !tags.isEmpty()) {
-            int targetId = (team_color == 1) ? 24 : 20;
+            int targetId = (team_color == 1) ? TAG_ID_RED : TAG_ID_BLUE;
 
             for (AprilTagDetection tag : tags) {
                 if (tag.id == targetId) {

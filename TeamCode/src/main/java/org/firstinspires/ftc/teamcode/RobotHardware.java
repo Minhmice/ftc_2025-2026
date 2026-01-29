@@ -11,6 +11,8 @@ import com.qualcomm.robotcore.hardware.PwmControl;
 import com.qualcomm.robotcore.hardware.ServoImplEx;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 
+import android.util.Size;
+
 import org.firstinspires.ftc.robotcore.external.hardware.camera.CameraName;
 import org.firstinspires.ftc.vision.VisionPortal;
 import org.firstinspires.ftc.vision.apriltag.AprilTagProcessor;
@@ -39,6 +41,8 @@ public class RobotHardware {
     // Vision
     public AprilTagProcessor april_tag;
     public VisionPortal visionPortal;
+    /** Optional: capture frame for UDP stream. Set before init() if UdpConfig valid. */
+    private FrameCaptureProcessor frameCaptureProcessor;
 
     // Sensors
     public TCS34725_ColorSensor color_sensor0, color_sensor1, color_sensor2;
@@ -62,6 +66,15 @@ public class RobotHardware {
     }
 
     public void initAprilTag() { init_april_tag(); }
+
+    /** Gọi trước init() nếu muốn gửi camera qua UDP. */
+    public void setFrameCaptureProcessor(FrameCaptureProcessor processor) {
+        this.frameCaptureProcessor = processor;
+    }
+
+    public FrameCaptureProcessor getFrameCaptureProcessor() {
+        return frameCaptureProcessor;
+    }
 
     private void init_motor() {
         motor_1 = hardwareMap.get(DcMotor.class, "motor_1");
@@ -126,11 +139,17 @@ public class RobotHardware {
     }
 
     private void init_april_tag() {
-        april_tag = AprilTagProcessor.easyCreateWithDefaults();
-        visionPortal = new VisionPortal.Builder()
+        april_tag = new AprilTagProcessor.Builder().build();
+        // Decimation 2–3: trade range for FPS (~22–30 FPS) so turret gets fresh frames often
+        april_tag.setDecimation(2);
+        VisionPortal.Builder builder = new VisionPortal.Builder()
                 .setCamera(hardwareMap.get(CameraName.class, "cam1"))
-                .addProcessor(april_tag)
-                .build();
+                .setCameraResolution(new Size(640, 480))
+                .addProcessor(april_tag);
+        if (frameCaptureProcessor != null) {
+            builder.addProcessor(frameCaptureProcessor);
+        }
+        visionPortal = builder.build();
     }
 
     private void init_color_sensor() {

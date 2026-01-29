@@ -135,6 +135,16 @@ public class ArtifactProcessing {
         }
     }
 
+    /** Bản sao 3 slot artifact (0=empty, 1=green, 2=purple). */
+    public int[] getArtifactSlots() {
+        return new int[]{artifact_slots[0], artifact_slots[1], artifact_slots[2]};
+    }
+
+    /** Bản sao hàng đợi artifact (thứ tự chuẩn bị bắn). */
+    public int[] getArtifactQueue() {
+        return new int[]{artifact_queue[0], artifact_queue[1], artifact_queue[2]};
+    }
+
     private int find_artifact(int color) {
         if (color == 0) return -1;
         for (int i = 0; i <= 2; i++) {
@@ -147,11 +157,11 @@ public class ArtifactProcessing {
     // Collector
     // ----------------------------
 
-    public void run_collecter() {
+    public void run_collector() {
         robot.motor_collector.setPower(1);
     }
 
-    public void stop_collecter() {
+    public void stop_collector() {
         robot.motor_collector.setPower(0);
     }
 
