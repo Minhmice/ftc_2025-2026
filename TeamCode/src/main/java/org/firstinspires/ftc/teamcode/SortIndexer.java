@@ -1,145 +1,235 @@
 package org.firstinspires.ftc.teamcode;
 
+import com.qualcomm.robotcore.hardware.ServoImplEx;
 import com.qualcomm.robotcore.util.ElapsedTime;
-import com.qualcomm.robotcore.hardware.Servo;
 
+/**
+ * SortIndexer - Điều khiển servo sort 360° (REV Smart Servo) theo thời gian để căn 3 ô bóng.
+ * Mỗi "step" = quay từ ô hiện tại sang ô kế tiếp (0→1, 1→2, 2→0). Timing tùy chỉnh cho từng bước.
+ */
 public class SortIndexer {
 
-    // ====== Servo spec / config ======
-    // Servo angular range (spec): 270 deg
-    private static final double SERVO_RANGE_DEG = 270.0;
+    private final ServoImplEx servo;
 
-    // Speed: 0.14s / 60deg @6V  -> seconds per degree:
-    private static final double SEC_PER_DEG = 0.14 / 60.0;
+    // ----- TODO: chỉnh trên robot cho đúng 3 ô (ms) -----
+    /** Thời gian quay từ ô 1 sang ô 2. */
+    public static long TIME_MS_SLOT0_TO_SLOT1 = 1000;
+    /** Thời gian quay từ ô 2 sang ô 3. */
+    public static long TIME_MS_SLOT1_TO_SLOT2 = 1000;
+    /** Thời gian quay từ ô 3 về ô 1. */
+    public static long TIME_MS_SLOT2_TO_SLOT0 = 1000;
 
-    // Pause time between steps
-    private static final double PAUSE_SEC = 0.5;
+    /** Thời gian quay nửa ô – căn bóng vào vị trí kicker (intake và kicker đối nhau). TODO: chỉnh trên robot. */
+    public static long TIME_MS_HALF_SLOT = 500;
 
-    // Add a small safety margin so servo has time to settle
-    private static final double MOVE_MARGIN_SEC = 0.05;
+    /** Dpad manual: 120° theo 0.14 s/60° = 280 ms; nghỉ 0.5 s giữa các lần; 60° = 140 ms. */
+    public static long TIME_MS_120_DEG = 280;
+    public static long TIME_MS_60_DEG = 140;
+    public static long TIME_MS_DPAD_REST = 500;
 
-    // ====== Calibration (IMPORTANT) ======
-    // "0 deg" position of your mechanism. Start with 0.0, then tune.
-    // If your mechanism's "home angle" corresponds to servo pos 0.5, set ZERO_POS = 0.5.
-    private static final double ZERO_POS = 0.0;
+    /** Servo positional: range 270° (angle 0..270 -> position 0..1). */
+    public static final double ANGLE_RANGE_DEG = 270.0;
 
-    // If servo direction is reversed mechanically, set DIR = -1
-    private static final int DIR = +1;
+    /** Continuous servo: 0.5 = stop, <0.5 = one dir, >0.5 = other (like Turret). */
+    private static final double SERVO_POS_STOP = 0.5;
+    private static final double SERVO_POS_CW = 0.25;
+    private static final double SERVO_POS_CCW = 0.75;
 
-    // ====== Cycle steps ======
-    private static final double STEP_LEFT_DEG  = 120.0;
-    private static final double STEP_RIGHT_DEG = 60.0;
+    /** Ô hiện tại đang ở vị trí bắn (0, 1, 2). */
+    private int currentSlot = 0;
 
-    private enum Mode { NONE, LEFT, RIGHT }
-    private enum State { IDLE, MOVING, PAUSING }
-
-    private final Servo servo;
-
-    private Mode mode = Mode.NONE;
+    private enum State { IDLE, ROTATING, ROTATING_120, RESTING, ROTATING_60 }
     private State state = State.IDLE;
+    private final ElapsedTime rotateTimer = new ElapsedTime(ElapsedTime.Resolution.MILLISECONDS);
+    private long rotateDurationMs = 0;
+    private int nextSlotAfterRotate = 0;
 
-    // We track last commanded angle (estimate). Servo doesn't report true angle.
-    private double currentAngleDeg = 0.0;
-    private double targetAngleDeg = 0.0;
+    private int pendingSteps = 0;
+    private boolean pendingClockwise = true;
 
-    private final ElapsedTime timer = new ElapsedTime();
-    private double plannedMoveSec = 0.0;
+    private boolean pendingHalfStep = false;
+    private boolean pendingHalfClockwise = true;
+    private boolean isCurrentRotationHalf = false;
 
-    public SortingServoCycle(Servo servo) {
+    /** Dpad Left held: set mỗi frame từ Main/ArtifactProcessing. */
+    private boolean dpadLeftHeld = false;
+    /** Dpad Right pressed (edge): request một lần 60°. */
+    private boolean dpadRightRequested = false;
+
+    /** Góc hiện tại khi điều khiển Dpad (positional servo 0..270°). Giữ tại góc mới, không set 0.5. */
+    private double currentAngleDeg = 135.0;
+    /** Góc đích khi đang ROTATING_120 hoặc ROTATING_60 (để cập nhật currentAngleDeg khi xong). */
+    private double targetAngleDeg = 135.0;
+
+    public SortIndexer(ServoImplEx servo) {
         this.servo = servo;
-        // Initialize at currentAngleDeg = 0 -> position ZERO_POS
-        servo.setPosition(angleDegToPos(currentAngleDeg));
+        servo.setPosition(SERVO_POS_STOP);
+        currentAngleDeg = 135.0;
+        servo.setPosition(angleToPosition(currentAngleDeg));
     }
 
-    /**
-     * Call this every loop (TeleOp).
-     * @param holdLeft  gamepad2.dpad_left
-     * @param holdRight gamepad2.dpad_right
-     */
-    public void update(boolean holdLeft, boolean holdRight) {
-        Mode newMode = Mode.NONE;
-        if (holdLeft && !holdRight) newMode = Mode.LEFT;
-        else if (holdRight && !holdLeft) newMode = Mode.RIGHT;
+    /** Góc (0..270°) -> position [0, 1] cho servo positional. */
+    private double angleToPosition(double angleDeg) {
+        double a = angleDeg;
+        while (a < 0) a += ANGLE_RANGE_DEG;
+        while (a > ANGLE_RANGE_DEG) a -= ANGLE_RANGE_DEG;
+        return Math.max(0, Math.min(1, a / ANGLE_RANGE_DEG));
+    }
 
-        // If mode changed (pressed/released/switch), reset state cleanly
-        if (newMode != mode) {
-            mode = newMode;
-            state = (mode == Mode.NONE) ? State.IDLE : State.MOVING;
-            timer.reset();
+    /** Wrap góc về [0, ANGLE_RANGE_DEG]. */
+    private double wrapAngle(double angleDeg) {
+        double a = angleDeg;
+        while (a < 0) a += ANGLE_RANGE_DEG;
+        while (a > ANGLE_RANGE_DEG) a -= ANGLE_RANGE_DEG;
+        return a;
+    }
 
-            if (mode == Mode.NONE) {
-                // Stop cycling: just hold current position
-                servo.setPosition(angleDegToPos(currentAngleDeg));
+    /** Yêu cầu quay N bước (mỗi bước = sang ô kế tiếp theo chiều cw/ccw). */
+    public void requestRotate(boolean clockwise, int steps) {
+        if (steps <= 0) return;
+        if (pendingSteps == 0) {
+            pendingClockwise = clockwise;
+            pendingSteps = steps;
+        } else {
+            if (pendingClockwise == clockwise) pendingSteps += steps;
+            else {
+                pendingClockwise = clockwise;
+                pendingSteps = steps;
+            }
+        }
+    }
+
+    /** Yêu cầu quay nửa ô (căn bóng vào kicker; không đổi currentSlot). */
+    public void requestRotateHalf(boolean clockwise) {
+        pendingHalfStep = true;
+        pendingHalfClockwise = clockwise;
+    }
+
+    /** Main/ArtifactProcessing gọi mỗi frame khi đọc gamepad. */
+    public void setDpadLeftHeld(boolean held) {
+        dpadLeftHeld = held;
+    }
+
+    /** Main gọi một lần khi nhấn Dpad Right (edge). */
+    public void requestDpadRight60() {
+        dpadRightRequested = true;
+    }
+
+    /** Gọi mỗi vòng lặp. */
+    public void update() {
+        if (state == State.ROTATING) {
+            if (rotateTimer.milliseconds() >= rotateDurationMs) {
+                servo.setPosition(SERVO_POS_STOP);
+                if (!isCurrentRotationHalf) currentSlot = nextSlotAfterRotate;
+                state = State.IDLE;
+                if (pendingSteps > 0) startNextStep();
+                else if (pendingHalfStep) startHalfStep();
+            }
+            return;
+        }
+        if (state == State.ROTATING_120) {
+            if (rotateTimer.milliseconds() >= TIME_MS_120_DEG) {
+                currentAngleDeg = targetAngleDeg;
+                if (dpadLeftHeld) {
+                    state = State.RESTING;
+                    rotateTimer.reset();
+                } else {
+                    state = State.IDLE;
+                }
+            }
+            return;
+        }
+        if (state == State.RESTING) {
+            if (rotateTimer.milliseconds() >= TIME_MS_DPAD_REST) {
+                if (dpadLeftHeld) {
+                    targetAngleDeg = wrapAngle(currentAngleDeg + 120);
+                    servo.setPosition(angleToPosition(targetAngleDeg));
+                    state = State.ROTATING_120;
+                    rotateTimer.reset();
+                } else {
+                    state = State.IDLE;
+                }
+            }
+            return;
+        }
+        if (state == State.ROTATING_60) {
+            if (rotateTimer.milliseconds() >= TIME_MS_60_DEG) {
+                currentAngleDeg = targetAngleDeg;
+                state = State.IDLE;
+            }
+            return;
+        }
+        if (state == State.IDLE) {
+            if (dpadRightRequested) {
+                dpadRightRequested = false;
+                targetAngleDeg = wrapAngle(currentAngleDeg - 60);
+                servo.setPosition(angleToPosition(targetAngleDeg));
+                rotateTimer.reset();
+                state = State.ROTATING_60;
                 return;
             }
-        }
-
-        if (mode == Mode.NONE) return;
-
-        double stepDeg = (mode == Mode.LEFT) ? STEP_LEFT_DEG : STEP_RIGHT_DEG;
-
-        switch (state) {
-            case MOVING: {
-                // If just entered MOVING (timer ~ 0), compute a new target and command servo
-                if (timer.seconds() < 1e-6) {
-                    targetAngleDeg = wrapAngleDeg(currentAngleDeg + DIR * stepDeg);
-                    servo.setPosition(angleDegToPos(targetAngleDeg));
-
-                    plannedMoveSec = Math.abs(stepDeg) * SEC_PER_DEG + MOVE_MARGIN_SEC;
-                }
-
-                // After the estimated move time, we consider it reached
-                if (timer.seconds() >= plannedMoveSec) {
-                    currentAngleDeg = targetAngleDeg;  // commit
-                    state = State.PAUSING;
-                    timer.reset();
-                }
-                break;
+            if (dpadLeftHeld) {
+                targetAngleDeg = wrapAngle(currentAngleDeg + 120);
+                servo.setPosition(angleToPosition(targetAngleDeg));
+                rotateTimer.reset();
+                state = State.ROTATING_120;
+                return;
             }
-
-            case PAUSING: {
-                if (timer.seconds() >= PAUSE_SEC) {
-                    state = State.MOVING;
-                    timer.reset();
-                }
-                break;
+            if (pendingSteps > 0) {
+                startNextStep();
+            } else if (pendingHalfStep) {
+                startHalfStep();
             }
-
-            default:
-            case IDLE:
-                // should not happen while mode != NONE
-                state = State.MOVING;
-                timer.reset();
-                break;
         }
     }
 
-    // ===== helpers =====
-
-    private double angleDegToPos(double angleDeg) {
-        // Map [0..270] deg -> [0..1] around ZERO_POS
-        double pos = ZERO_POS + (angleDeg / SERVO_RANGE_DEG);
-        return clamp(pos, 0.0, 1.0);
+    private void startNextStep() {
+        if (pendingSteps <= 0) return;
+        isCurrentRotationHalf = false;
+        int nextSlot = nextSlotFrom(currentSlot, pendingClockwise);
+        long durationMs = getDurationMs(currentSlot, nextSlot);
+        servo.setPosition(pendingClockwise ? SERVO_POS_CW : SERVO_POS_CCW);
+        rotateDurationMs = durationMs;
+        nextSlotAfterRotate = nextSlot;
+        rotateTimer.reset();
+        state = State.ROTATING;
+        pendingSteps--;
     }
 
-    private double wrapAngleDeg(double angleDeg) {
-        // keep in [0..SERVO_RANGE_DEG)
-        double r = angleDeg % SERVO_RANGE_DEG;
-        if (r < 0) r += SERVO_RANGE_DEG;
-        return r;
+    private void startHalfStep() {
+        if (!pendingHalfStep) return;
+        isCurrentRotationHalf = true;
+        pendingHalfStep = false;
+        servo.setPosition(pendingHalfClockwise ? SERVO_POS_CW : SERVO_POS_CCW);
+        rotateDurationMs = TIME_MS_HALF_SLOT;
+        nextSlotAfterRotate = currentSlot;
+        rotateTimer.reset();
+        state = State.ROTATING;
     }
 
-    private double clamp(double v, double lo, double hi) {
-        return Math.max(lo, Math.min(hi, v));
+    private int nextSlotFrom(int from, boolean cw) {
+        if (cw) return (from + 1) % 3;
+        return (from + 2) % 3; // CCW = -1 mod 3
     }
 
-    // Optional: if you want to set currentAngle when you "home" the mechanism
-    public void setCurrentAngleDeg(double angleDeg) {
-        currentAngleDeg = wrapAngleDeg(angleDeg);
-        servo.setPosition(angleDegToPos(currentAngleDeg));
+    private long getDurationMs(int fromSlot, int toSlot) {
+        if (fromSlot == 0 && toSlot == 1) return TIME_MS_SLOT0_TO_SLOT1;
+        if (fromSlot == 1 && toSlot == 2) return TIME_MS_SLOT1_TO_SLOT2;
+        if (fromSlot == 2 && toSlot == 0) return TIME_MS_SLOT2_TO_SLOT0;
+        // Reverse direction: use same timing (assume symmetric)
+        if (fromSlot == 1 && toSlot == 0) return TIME_MS_SLOT0_TO_SLOT1;
+        if (fromSlot == 2 && toSlot == 1) return TIME_MS_SLOT1_TO_SLOT2;
+        if (fromSlot == 0 && toSlot == 2) return TIME_MS_SLOT2_TO_SLOT0;
+        return 1000;
     }
 
-    public double getCurrentAngleDeg() {
-        return currentAngleDeg;
+    public boolean isIdle() {
+        if (state == State.ROTATING_120 || state == State.RESTING || state == State.ROTATING_60)
+            return false;
+        return state == State.IDLE && pendingSteps == 0 && !pendingHalfStep;
+    }
+
+    public int getCurrentSlot() {
+        return currentSlot;
     }
 }
