@@ -1,8 +1,6 @@
 package org.firstinspires.ftc.teamcode;
 
 import com.qualcomm.robotcore.hardware.DcMotor;
-import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
-import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
 
 public class Movement {
     private final RobotHardware robot;
@@ -31,39 +29,26 @@ public class Movement {
     }
 
     public void move_robot() {
-        // IMU yaw (rad). Assume +CCW
-        YawPitchRollAngles orientation = robot.imu.getRobotYawPitchRollAngles();
-        double heading = orientation.getYaw(AngleUnit.RADIANS);
+        // Read gamepad only (after deadzone). No IMU, no field-centric.
+        // driver_gamepad_x: strafe right +, driver_gamepad_y: forward +, driver_gamepad_rotate: right + (CW+)
+        double x = applyDeadzone(gamepadController.driver_gamepad_x);
+        double y = applyDeadzone(gamepadController.driver_gamepad_y);
+        double rotate = applyDeadzone(gamepadController.driver_gamepad_rotate);
 
-        // Read sticks (after deadzone)
-        // Your assumption:
-        // driver_gamepad_x: strafe right +
-        // driver_gamepad_y: forward up +
-        // driver_gamepad_rotate: right + (usually CW+)
-        double x = applyDeadzone(gamepadController.driver_gamepad_x);        // right +
-        double y = applyDeadzone(gamepadController.driver_gamepad_y);        // forward +
-        double rotate = applyDeadzone(gamepadController.driver_gamepad_rotate); // right +
+        // Save robot-frame for Odometry: forward +, strafe +left, turn +CCW
+        cmdForward = y;
+        cmdStrafe  = -x;
+        cmdTurn    = -rotate;
 
-        // ===== Save ROBOT-FRAME intent for Odometry =====
-        // Odometry expects: strafe +left, turn +CCW
-        cmdForward = y;          // forward +
-        cmdStrafe  = -x;         // left + = -right
-        cmdTurn    = -rotate;    // CCW + = -CW (common). If your turn is reversed, flip sign here.
+        // Mecanum mixing (robot-centric): forward=y, strafe=-x, turn=-rotate (CCW+)
+        double forward = y;
+        double strafe  = -x;
+        double turn    = -rotate;
 
-        // ===== Field-centric transform for driving =====
-        // We want to drive based on field, so rotate joystick (robot frame) by -heading
-        // Using x=right+, y=forward+
-        double cos = Math.cos(heading);
-        double sin = Math.sin(heading);
-
-        double rotatedX = x * cos + y * sin;     // right +
-        double rotatedY = -x * sin + y * cos;    // forward +
-
-        // ===== Mecanum mixing (robot-centric power) =====
-        double frontLeftPower  = rotatedY + rotatedX + rotate;
-        double frontRightPower = rotatedY - rotatedX - rotate;
-        double backLeftPower   = rotatedY - rotatedX + rotate;
-        double backRightPower  = rotatedY + rotatedX - rotate;
+        double frontLeftPower  = forward + strafe + turn;
+        double frontRightPower = forward - strafe - turn;
+        double backLeftPower   = forward - strafe + turn;
+        double backRightPower  = forward + strafe - turn;
 
         // Normalize to maxSpeed
         double maxPower = Math.max(

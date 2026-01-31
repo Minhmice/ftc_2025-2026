@@ -3,8 +3,6 @@ package org.firstinspires.ftc.teamcode;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 
-import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
-
 /**
  * Main TeleOp – điều khiển robot FTC trong chế độ lái tay.
  * Tích hợp: di chuyển, turret, intake/artifact, shooter (flywheel + kick), vision (AprilTag).
@@ -14,7 +12,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
  * - Intake: Circle = chạy collector, Square = dừng
  * - Flywheel: LB = bật, RB = tắt
  * - Bắn: Triangle = bắt đầu chuỗi bắn
- * - Góc bắn: Y = +trim, A = -trim, Back = bật/tắt auto-angle theo AprilTag
+ * - Sort: Dpad Left (giữ) = 120° + nghỉ 0.5s lặp; Dpad Right (nhấn) = 60° một lần
  */
 @TeleOp(name = "TELEOP")
 public class Main extends LinearOpMode implements KickStateSetter {
@@ -28,29 +26,24 @@ public class Main extends LinearOpMode implements KickStateSetter {
     /** Bật/tắt flywheel (LB = bật, RB = tắt). */
     public boolean shooter_active = false;
 
-    /** Góc servo bắn thực tế – dùng cho telemetry/debug. */
-    public double shooting_angle = 0;
-
     /** Công suất flywheel cố định 90% – không chỉnh bằng dpad. */
     public static final double SHOOTER_POWER_FIXED = 0.90;
 
     /** Giá trị mặc định team_color (1 hoặc 2 theo đội) – dùng cho vision/tag. */
     private static final int TEAM_COLOR_DEFAULT = 1;
 
-    /** Tốc độ tối đa drive (0.25 = 25%). */
-    private static final double DEFAULT_MAX_SPEED = 0.25;
+    /** Tốc độ tối đa drive mặc định (55%). */
+    private static final double DEFAULT_MAX_SPEED = 0.55;
+    /** Turbo: gamepad1 RB. Slow: gamepad1 LB. */
+    private static final double TURBO_SPEED = 0.80;
+    private static final double SLOW_SPEED = 0.20;
     /** Deadzone joystick (0.1 = 10%). */
     private static final double DEFAULT_DEADZONE = 0.1;
-
-    /** Trạng thái nút trước đó – dùng edge-trigger (chỉ xử lý khi nhấn lần đầu). */
-    private boolean lastY = false;
-    private boolean lastA = false;
-    private boolean lastBack = false;
 
     // ================== SYSTEM COMPONENTS ==================
     /** Màu đội (dùng cho vision/tag). Red=1, Blue=2; subclass set trước super.runOpMode(). */
     public int team_color = TEAM_COLOR_DEFAULT;
-    /** Truy cập phần cứng (motor, servo, IMU, ...). */
+    /** Truy cập phần cứng (motor, servo, ...). */
     RobotHardware robot;
     /** Đọc cảm biến (khoảng cách, limit, ...). */
     SensorManager sensorManager;
@@ -62,30 +55,25 @@ public class Main extends LinearOpMode implements KickStateSetter {
     ArtifactProcessing artifactProcessing;
     /** Điều khiển turret (xoay theo tag hoặc tay). */
     Turret turret;
-    /** Nhận diện AprilTag và khoảng cách (phục vụ góc bắn). */
+    /** Nhận diện AprilTag và khoảng cách (phục vụ turret). */
     TagProcessing tagProcessing;
-    /** Ước lượng vị trí robot (x, y) từ encoder/IMU. */
+    /** Ước lượng vị trí robot (x, y) từ encoder. */
     Odometry odometry;
-    /** Flywheel + servo góc + kick + auto-angle. */
+    /** Flywheel + kick. */
     Shooter shooter;
-    /** Điều phối chuỗi bắn (Triangle -> pre_shoot -> kick -> post_shoot). */
-    ShootCoordinator shootCoordinator;
 
-    /** UDP: gửi log + camera tới laptop (khi udp_config.txt hợp lệ). */
-    private UdpConfig udpConfig;
-    private UdpLogger udpLogger;
-    private FrameCaptureProcessor frameCaptureProcessor;
+    /** Chuỗi bắn: Triangle -> pre_shoot -> kick -> post_shoot (inline, không dùng ShootCoordinator). */
+    private boolean lastTriangle = false;
+    private boolean inshoot = false;
+    private boolean kickStarted = false;
+    /** Edge-trigger cho Dpad Right (60° một lần). */
+    private boolean lastDpadRight = false;
 
     @Override
     public void runOpMode() throws InterruptedException {
 
         // ---------- INIT: khởi tạo phần cứng và các module ----------
         robot = new RobotHardware(hardwareMap);
-        udpConfig = new UdpConfig(UdpConfig.DEFAULT_PATH);
-        if (udpConfig.isValid()) {
-            frameCaptureProcessor = new FrameCaptureProcessor(udpConfig);
-            robot.setFrameCaptureProcessor(frameCaptureProcessor);
-        }
         robot.init();
 
         sensorManager = new SensorManager(robot);
@@ -96,14 +84,8 @@ public class Main extends LinearOpMode implements KickStateSetter {
         turret = new Turret(robot, sensorManager, gamepadController, this);
         odometry = new Odometry(robot, 0, 0);
         shooter = new Shooter(robot, (KickStateSetter) this);
-        shootCoordinator = new ShootCoordinator(artifactProcessing, shooter);
 
         waitForStart();
-
-        if (udpConfig != null && udpConfig.isValid()) {
-            udpLogger = new UdpLogger(udpConfig);
-            udpLogger.start();
-        }
 
         movement.setMaxSpeed(DEFAULT_MAX_SPEED);
         movement.setDeadzone(DEFAULT_DEADZONE);
@@ -114,40 +96,28 @@ public class Main extends LinearOpMode implements KickStateSetter {
             // ---------- INPUT: đọc và lưu trạng thái gamepad ----------
             gamepadController.update_gamepad();
 
-            // ---------- VISION: cập nhật phát hiện AprilTag và khoảng cách ----------
+            // ---------- DRIVE SPEED: gamepad1 RB = turbo, LB = slow, else default ----------
+            if (gamepad1.right_bumper) movement.setMaxSpeed(TURBO_SPEED);
+            else if (gamepad1.left_bumper) movement.setMaxSpeed(SLOW_SPEED);
+            else movement.setMaxSpeed(DEFAULT_MAX_SPEED);
+
+            // ---------- VISION: AprilTag phục vụ turret / range ----------
             tagProcessing.update(team_color);
 
-            // ---------- AUTO SHOOTING ANGLE (gamepad2) ----------
-            // Y: tăng trim góc (+0.01), A: giảm trim (-0.01) – chỉ khi nhấn lần đầu (edge-trigger)
-            boolean y = gamepad2.y;
-            boolean a = gamepad2.a;
-
-            if (y && !lastY) shooter.nudgeAngleTrim(+0.01);
-            if (a && !lastA) shooter.nudgeAngleTrim(-0.01);
-
-            lastY = y;
-            lastA = a;
-
-            // Back: bật/tắt chế độ auto-angle (góc bắn theo khoảng cách tag)
-            boolean back = gamepad2.back;
-            if (back && !lastBack) {
-                shooter.setAutoAngleEnabled(!shooter.isAutoAngleEnabled());
+            // ---------- SORT Dpad: Left (giữ) = 120° + nghỉ 0.5s; Right (nhấn) = 60° ----------
+            artifactProcessing.setDpadLeftHeld(gamepad2.dpad_left);
+            if (gamepad2.dpad_right && !lastDpadRight) {
+                artifactProcessing.requestDpadRight60();
             }
-            lastBack = back;
+            lastDpadRight = gamepad2.dpad_right;
 
-            // Tính và set góc servo bắn dựa trên khoảng cách AprilTag (nếu auto-angle bật)
-            shooter.updateAutoAngle(tagProcessing);
-
-            // Lấy góc servo thực tế cho telemetry
-            shooting_angle = robot.angle_servo.getPosition();
-
-            // ---------- ARTIFACT: cập nhật queue, trạng thái slot, chuẩn bị kick ----------
+            // ---------- ARTIFACT: slotHasBall (timing), chuẩn bị kick ----------
             artifactProcessing.update();
 
             // ---------- DRIVE: di chuyển robot theo gamepad1 ----------
             movement.move_robot();
 
-            // ---------- ODOMETRY: cập nhật vị trí (x, y) từ encoder + IMU ----------
+            // ---------- ODOMETRY: cập nhật vị trí (x, y) từ encoder ----------
             odometry.setDriveCommand(
                     movement.getCmdForward(),
                     movement.getCmdStrafe(),
@@ -158,18 +128,23 @@ public class Main extends LinearOpMode implements KickStateSetter {
             // ---------- TURRET: xoay turret theo tag hoặc điều khiển tay ----------
             turret.update();
 
-            // ---------- INTAKE: Circle = chạy collector, Square = dừng ----------
-            if (gamepad2.circle) {
+            // ---------- INTAKE: Circle = chạy collector; không chạy khi 3 slot đầy (timing-only) ----------
+            boolean slotsFull = artifactProcessing.getBallCount() >= 3;
+            if (gamepad2.circle && !slotsFull) {
+                artifactProcessing.setCollectorRunning(true);
                 artifactProcessing.run_collector();
-            } else if (gamepad2.square) {
+            } else {
+                artifactProcessing.setCollectorRunning(false);
                 artifactProcessing.stop_collector();
             }
 
-            // ---------- FLYWHEEL: LB = bật, RB = tắt; khi bật chạy ở 90% (ổn định pin) ----------
+            // ---------- FLYWHEEL: LB = bật, RB = tắt; không bấm thì auto bật khi có bóng để bắn ----------
             if (gamepad2.left_bumper) {
                 shooter_active = true;
             } else if (gamepad2.right_bumper) {
                 shooter_active = false;
+            } else if (artifactProcessing.hasBallToShoot()) {
+                shooter_active = true;
             }
 
             if (shooter_active) {
@@ -178,58 +153,42 @@ public class Main extends LinearOpMode implements KickStateSetter {
                 shooter.stop_flywheel_motor();
             }
 
-            // ---------- SHOOT SEQUENCE: Triangle bắt đầu chuỗi bắn ----------
-            shootCoordinator.update(gamepad2.triangle);
+            // ---------- SHOOT SEQUENCE: Triangle -> pre_shoot -> kick -> post_shoot ----------
+            boolean triangle = gamepad2.triangle;
+            if (triangle && !lastTriangle) {
+                inshoot = true;
+                kickStarted = false;
+                artifactProcessing.start_pre_shoot();
+            }
+            lastTriangle = triangle;
+            if (inshoot) {
+                if (artifactProcessing.is_ready_to_kick()) shooter.request_kick();
+                if (shooter.isKicking()) kickStarted = true;
+                if (kickStarted && !shooter.isKicking()) {
+                    artifactProcessing.request_post_shoot();
+                    inshoot = false;
+                    kickStarted = false;
+                }
+            }
+            shooter.update();
 
             // ---------- TELEMETRY: hiển thị trạng thái lên Driver Station ----------
             updateTelemetry();
-
-            // ---------- UDP: gửi log + frame tới laptop ----------
-            if (udpLogger != null) {
-                udpLogger.pushLog(buildTelemetryString());
-                if (frameCaptureProcessor != null) {
-                    byte[] jpeg = frameCaptureProcessor.getLastJpeg();
-                    if (jpeg != null) udpLogger.pushJpeg(jpeg);
-                }
-            }
         }
-        if (udpLogger != null) udpLogger.stop();
-    }
-
-    /** Chuỗi telemetry (cùng nội dung updateTelemetry) để gửi UDP. */
-    private String buildTelemetryString() {
-        int[] slots = artifactProcessing.getArtifactSlots();
-        int[] queue = artifactProcessing.getArtifactQueue();
-        String senderIp = (udpLogger != null) ? udpLogger.getSenderIp() : "N/A";
-        return String.format(
-                "AutoAngle: %s\nAnglePos: %.3f\nTagDetected: %s\nTagRange(in): %.1f\nFlywheel: %s\nYaw (deg): %.1f\nX (cm): %.2f\nY (cm): %.2f\nSlots [0,1,2]: %d %d %d\nQueue [0,1,2]: %d %d %d\nShootState: %s\nUDP sender IP: %s",
-                shooter.isAutoAngleEnabled(), shooting_angle, tagProcessing.isDetected(),
-                tagProcessing.getRangeInches(), shooter_active ? "ON" : "OFF",
-                robot.imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES),
-                odometry.getX(), odometry.getY(),
-                slots[0], slots[1], slots[2], queue[0], queue[1], queue[2],
-                shootCoordinator.getShootStateLabel(artifactProcessing.is_ready_to_kick()), senderIp);
     }
 
     private void updateTelemetry() {
-        telemetry.addData("AutoAngle", shooter.isAutoAngleEnabled());
-        telemetry.addData("AnglePos", "%.3f", shooting_angle);
         telemetry.addData("TagDetected", tagProcessing.isDetected());
         telemetry.addData("TagRange(in)", "%.1f", tagProcessing.getRangeInches());
         telemetry.addData("Flywheel", shooter_active ? "ON" : "OFF");
-        telemetry.addData("Yaw (deg)",
-                robot.imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES));
         telemetry.addData("X (cm)", "%.2f", odometry.getX());
         telemetry.addData("Y (cm)", "%.2f", odometry.getY());
         int[] slots = artifactProcessing.getArtifactSlots();
         telemetry.addData("Slots [0,1,2]", "%d %d %d", slots[0], slots[1], slots[2]);
-        int[] queue = artifactProcessing.getArtifactQueue();
-        telemetry.addData("Queue [0,1,2]", "%d %d %d", queue[0], queue[1], queue[2]);
-        telemetry.addData("ShootState",
-                shootCoordinator.getShootStateLabel(artifactProcessing.is_ready_to_kick()));
-        if (udpLogger != null) {
-            telemetry.addData("UDP sender IP", udpLogger.getSenderIp());
-        }
+        telemetry.addData("BallCount", artifactProcessing.getBallCount());
+        boolean readyToKick = artifactProcessing.is_ready_to_kick();
+        String shootStateLabel = readyToKick ? "READY" : (inshoot ? "PREP" : "IDLE");
+        telemetry.addData("ShootState", shootStateLabel);
         telemetry.update();
     }
 }

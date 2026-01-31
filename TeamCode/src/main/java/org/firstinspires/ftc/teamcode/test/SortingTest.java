@@ -2,42 +2,45 @@ package org.firstinspires.ftc.teamcode.test;
 
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
-import com.qualcomm.robotcore.hardware.DcMotor;
+
+import org.firstinspires.ftc.teamcode.RobotHardware;
+import org.firstinspires.ftc.teamcode.SortIndexer;
+
+/**
+ * Test sort bóng: servo_sort (REV Smart Servo 360°) + SortIndexer.
+ * Dpad Left = quay 1 step CW, Dpad Right = quay 1 step CCW.
+ * Chỉnh TIME_MS_SLOT0_TO_SLOT1, TIME_MS_SLOT1_TO_SLOT2, TIME_MS_SLOT2_TO_SLOT0 trong SortIndexer để căn 3 ô.
+ */
 @TeleOp(group = "TEST")
 public class SortingTest extends LinearOpMode {
 
-    private DcMotor motor_sorting;
-
-    private static final double GOBILDA_5202_TICKS_PER_REV = 537.7;
-    private static final double DEGREES_PER_TICK = 360.0 / GOBILDA_5202_TICKS_PER_REV;
-
-    private static final int TICKS_FOR_60_DEGREES = (int) (60 / DEGREES_PER_TICK);
-    boolean pressed;
+    private RobotHardware robot;
+    private SortIndexer sortIndexer;
+    private boolean lastLeft = false;
+    private boolean lastRight = false;
 
     @Override
     public void runOpMode() {
-        motor_sorting = hardwareMap.get(DcMotor.class, "motor_sorting");
-        motor_sorting.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        robot = new RobotHardware(hardwareMap);
+        robot.init();
+        sortIndexer = new SortIndexer(robot.servo_sort);
+
         waitForStart();
-        while(opModeIsActive()) {
-            if(gamepad2.dpad_left && !pressed) {
-                rotate_60_degrees(true, 0.01);
-                pressed = true;
-            } else {
-                pressed = false;
+        while (opModeIsActive()) {
+            sortIndexer.update();
+            boolean left = gamepad2.dpad_left;
+            boolean right = gamepad2.dpad_right;
+            if (left && !lastLeft && sortIndexer.isIdle()) {
+                sortIndexer.requestRotate(true, 1);
             }
-        }
-    }
-    public void rotate_60_degrees(boolean clockwise, double power) {
-
-        if (!motor_sorting.isBusy()) {
-            int direction = clockwise ? 1 : -1;
-            int currentPosition = motor_sorting.getCurrentPosition();
-            int targetPosition = currentPosition + (direction * TICKS_FOR_60_DEGREES);
-
-            motor_sorting.setTargetPosition(targetPosition);
-            motor_sorting.setMode(DcMotor.RunMode.RUN_TO_POSITION);
-            motor_sorting.setPower(Math.abs(power));
+            if (right && !lastRight && sortIndexer.isIdle()) {
+                sortIndexer.requestRotate(false, 1);
+            }
+            lastLeft = left;
+            lastRight = right;
+            telemetry.addData("Slot", sortIndexer.getCurrentSlot());
+            telemetry.addData("Idle", sortIndexer.isIdle());
+            telemetry.update();
         }
     }
 }

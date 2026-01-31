@@ -2,65 +2,64 @@ package org.firstinspires.ftc.teamcode;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
+/**
+ * Odometry - ước lượng vị trí (x, y, theta) từ encoder. Theta cố định 0 (không dùng IMU).
+ *
+ * Convention: dx_raw +left, dy_raw +forward, dTheta +CCW.
+ * Field frame: xCm, yCm (cm), thetaRad (rad, continuous).
+ */
 public class Odometry {
 
     private final RobotHardware robot;
 
-    // --- Pod specs ---
-    public static final double WHEEL_DIAMETER_CM = 3.2;   // 32mm
-    public static final double ENCODER_PPR = 2000.0;      // 2000 ppr
-    public static final double TICKS_PER_CM = ENCODER_PPR / (Math.PI * WHEEL_DIAMETER_CM); // ~198.94
+    // ===================== POD / ENCODER SPECS =====================
+    public static final double WHEEL_DIAMETER_CM = 3.2;     // 32mm
+    public static final double ENCODER_PPR = 2000.0;        // ticks per revolution
+    public static final double TICKS_PER_CM =
+            ENCODER_PPR / (Math.PI * WHEEL_DIAMETER_CM);
 
-    // --- SIGN CONFIG ---
+    // ===================== SIGN CONFIG =====================
     public static int X_ENCODER_SIGN = +1;  // odometry_x
     public static int Y_ENCODER_SIGN = -1;  // motor_4
     public static int IMU_YAW_SIGN   = +1;
 
-    // --- OFFSETS from robot CENTER (cm) ---
+    // ===================== GEOMETRY OFFSETS (cm) - theo em Vinh =====================
     // PARALLEL: lateral offset of Y encoder (+left, -right)
     // PERP: forward offset of X encoder (+forward, -back)
-    public static double PARALLEL_WHEEL_OFFSET_CM = +10.0; // your current best guess
-    public static double PERP_WHEEL_OFFSET_CM     = +10.0;
+    public static double PARALLEL_WHEEL_OFFSET_CM = -4.0;
+    public static double PERP_WHEEL_OFFSET_CM     = -15.0;
 
-    // --- SCRUB compensation (cm/rad) ---
-    // Learned automatically in rotate-only mode (you can also set manually).
-    public static double SCRUB_X_CM_PER_RAD = 0.0; // applies to X channel
-    public static double SCRUB_Y_CM_PER_RAD = 0.0; // applies to Y channel
+    // ===================== SCRUB COMPENSATION (cm/rad) =====================
+    public static double SCRUB_X_CM_PER_RAD = 0.0;
+    public static double SCRUB_Y_CM_PER_RAD = 0.0;
 
-    // Auto-learn settings
     public static boolean AUTO_LEARN_SCRUB = true;
-    public static double SCRUB_LEARN_ALPHA = 0.10; // 0..1 (EMA speed)
-    public static double SCRUB_CLAMP_CM_PER_RAD = 50.0; // safety clamp
+    public static double SCRUB_LEARN_ALPHA = 0.10;
+    public static double SCRUB_CLAMP_CM_PER_RAD = 50.0;
 
-    // --- Rotate-only detection thresholds (based on your drive command) ---
-    public static double ROT_ONLY_TURN_CMD_THR = 0.20;
+    public static double ROT_ONLY_TURN_CMD_THR  = 0.20;
     public static double ROT_ONLY_TRANS_CMD_THR = 0.06;
-
-    // Minimum heading change to use for learning (avoid noise)
     public static double MIN_DTHETA_FOR_LEARN_RAD = Math.toRadians(1.0);
 
-    // Pose (field) cm, theta continuous rad
-    private double xCm, yCm, thetaRad;
+    // Chặn tick nhảy khi robot đứng yên (em Vinh)
+    public static int MIN_TICKS_NOISE_X = 2;
+    public static int MIN_TICKS_NOISE_Y = 2;
 
-    // last sensors
+    private double xCm, yCm, thetaRad;
     private int lastXTicks, lastYTicks;
     private double lastThetaRad;
+    private double cmdForward = 0.0, cmdStrafe = 0.0, cmdTurn = 0.0;
 
-    // drive command (set by TeleOp)
-    private double cmdForward = 0.0; // +forward
-    private double cmdStrafe  = 0.0; // +left
-    private double cmdTurn    = 0.0; // +CCW
+    // Debug
+    private int lastDXticks, lastDYticks;
+    private double lastDxRaw, lastDyRaw, lastDTheta;
 
     public Odometry(RobotHardware robot, double startXcm, double startYcm) {
         this.robot = robot;
         resetPose(startXcm, startYcm);
     }
 
-    /**
-     * IMPORTANT: call this every loop BEFORE update()
-     * Use the same sign convention as your drive:
-     * forward: +forward, strafe: +left, turn: +CCW
-     */
+    /** Gọi mỗi loop TRƯỚC update(). */
     public void setDriveCommand(double forward, double strafe, double turn) {
         this.cmdForward = forward;
         this.cmdStrafe = strafe;
@@ -70,13 +69,13 @@ public class Odometry {
     public void resetPose(double startXcm, double startYcm) {
         this.xCm = startXcm;
         this.yCm = startYcm;
-
         double imu = getImuYawRadSigned();
         this.thetaRad = imu;
         this.lastThetaRad = imu;
-
         this.lastXTicks = getXTicksSigned();
         this.lastYTicks = getYTicksSigned();
+        this.lastDXticks = 0;
+        this.lastDYticks = 0;
     }
 
     public void update() {
@@ -87,72 +86,54 @@ public class Odometry {
         int dXticks = curX - lastXTicks;
         int dYticks = curY - lastYTicks;
 
-        double dx_raw = dXticks / TICKS_PER_CM; // +left
-        double dy_raw = dYticks / TICKS_PER_CM; // +forward
+        if (Math.abs(dXticks) <= MIN_TICKS_NOISE_X) dXticks = 0;
+        if (Math.abs(dYticks) <= MIN_TICKS_NOISE_Y) dYticks = 0;
+
+        double dx_raw = dXticks / TICKS_PER_CM;
+        double dy_raw = dYticks / TICKS_PER_CM;
 
         double dTheta = angleDelta(curTheta, lastThetaRad);
         double midTheta = lastThetaRad + 0.5 * dTheta;
 
-        // 1) rotate-only (giữ nguyên logic của bạn để LEARN scrub)
+        lastDXticks = dXticks;
+        lastDYticks = dYticks;
+        lastDxRaw = dx_raw;
+        lastDyRaw = dy_raw;
+        lastDTheta = dTheta;
+
         boolean rotateOnly =
                 Math.abs(cmdTurn) > ROT_ONLY_TURN_CMD_THR &&
-                        Math.abs(cmdForward) < ROT_ONLY_TRANS_CMD_THR &&
-                        Math.abs(cmdStrafe) < ROT_ONLY_TRANS_CMD_THR;
+                Math.abs(cmdForward) < ROT_ONLY_TRANS_CMD_THR &&
+                Math.abs(cmdStrafe) < ROT_ONLY_TRANS_CMD_THR;
 
-        // 2) turning lock: chỉ cần robot "đang xoay" là không cộng dịch chuyển
-        // - OR theo lệnh turn
-        // - OR theo IMU dTheta để phòng trường hợp bạn quên setDriveCommand()
-        final double TURN_LOCK_CMD_THR = 0.05;                 // chỉnh theo tay ga của bạn
-        final double TURN_LOCK_DTHETA_THR = Math.toRadians(0.5); // deadband chống nhiễu
-        boolean turningLock =
-                Math.abs(cmdTurn) > TURN_LOCK_CMD_THR ||
-                        Math.abs(dTheta) > TURN_LOCK_DTHETA_THR;
-
-        // -------- Offset compensation (center translation) --------
         double dy_center = dy_raw - (dTheta * PARALLEL_WHEEL_OFFSET_CM);
         double dx_center = dx_raw - (dTheta * PERP_WHEEL_OFFSET_CM);
-
-        // -------- Scrub compensation (empirical) --------
         dx_center -= (dTheta * SCRUB_X_CM_PER_RAD);
         dy_center -= (dTheta * SCRUB_Y_CM_PER_RAD);
 
-        // -------- Rotate-only: auto-learn scrub + hard lock --------
         if (rotateOnly) {
             if (AUTO_LEARN_SCRUB && Math.abs(dTheta) > MIN_DTHETA_FOR_LEARN_RAD) {
-                double kx_total = dx_raw / dTheta;
-                double ky_total = dy_raw / dTheta;
-
+                double invDtheta = 1.0 / dTheta;
+                double kx_total = dx_raw * invDtheta;
+                double ky_total = dy_raw * invDtheta;
                 double targetScrubX = kx_total - PERP_WHEEL_OFFSET_CM;
                 double targetScrubY = ky_total - PARALLEL_WHEEL_OFFSET_CM;
-
                 targetScrubX = clamp(targetScrubX, -SCRUB_CLAMP_CM_PER_RAD, SCRUB_CLAMP_CM_PER_RAD);
                 targetScrubY = clamp(targetScrubY, -SCRUB_CLAMP_CM_PER_RAD, SCRUB_CLAMP_CM_PER_RAD);
-
                 SCRUB_X_CM_PER_RAD = lerp(SCRUB_X_CM_PER_RAD, targetScrubX, SCRUB_LEARN_ALPHA);
                 SCRUB_Y_CM_PER_RAD = lerp(SCRUB_Y_CM_PER_RAD, targetScrubY, SCRUB_LEARN_ALPHA);
             }
-
             dx_center = 0.0;
             dy_center = 0.0;
         }
 
-        // -------- NEW: đang xoay là KHÔNG cộng dịch chuyển --------
-        // (kể cả không phải rotate-only; ví dụ bạn vừa xoay vừa rê nhẹ, thì vẫn bị khóa x,y)
-        if (turningLock) {
-            dx_center = 0.0;
-            dy_center = 0.0;
-        }
-
-        // Rotate robot-frame -> field-frame
         double cos = Math.cos(midTheta);
         double sin = Math.sin(midTheta);
-
         double dx_field = dx_center * cos - dy_center * sin;
         double dy_field = dx_center * sin + dy_center * cos;
 
         xCm += dx_field;
         yCm += dy_field;
-
         thetaRad = lastThetaRad + dTheta;
 
         lastXTicks = curX;
@@ -160,8 +141,6 @@ public class Odometry {
         lastThetaRad = thetaRad;
     }
 
-
-    // ---------------- Sensors ----------------
     private int getXTicksSigned() {
         return X_ENCODER_SIGN * robot.odometry_x.getCurrentPosition();
     }
@@ -170,15 +149,15 @@ public class Odometry {
         return Y_ENCODER_SIGN * robot.motor_4.getCurrentPosition();
     }
 
+    /** Theta không dùng IMU: luôn 0 (robot frame = field frame). */
     private double getImuYawRadSigned() {
-        return IMU_YAW_SIGN * robot.imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+        return 0.0;
     }
 
-    // ---------------- Utils ----------------
     private static double angleDelta(double target, double current) {
         double d = target - current;
         while (d <= -Math.PI) d += 2.0 * Math.PI;
-        while (d >  Math.PI) d -= 2.0 * Math.PI;
+        while (d > Math.PI) d -= 2.0 * Math.PI;
         return d;
     }
 
@@ -190,13 +169,15 @@ public class Odometry {
         return Math.max(lo, Math.min(hi, v));
     }
 
-    // ---------------- API ----------------
     public double getX() { return xCm; }
     public double getY() { return yCm; }
     public double getTheta(AngleUnit unit) { return unit.fromRadians(thetaRad); }
     public double getThetaRad() { return thetaRad; }
-
-    // For telemetry
     public double getScrubX() { return SCRUB_X_CM_PER_RAD; }
     public double getScrubY() { return SCRUB_Y_CM_PER_RAD; }
+    public int getLastDXticks() { return lastDXticks; }
+    public int getLastDYticks() { return lastDYticks; }
+    public double getLastDxRaw() { return lastDxRaw; }
+    public double getLastDyRaw() { return lastDyRaw; }
+    public double getLastDThetaRad() { return lastDTheta; }
 }

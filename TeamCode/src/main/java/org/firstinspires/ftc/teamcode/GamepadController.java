@@ -3,8 +3,8 @@ package org.firstinspires.ftc.teamcode;
 import com.qualcomm.robotcore.hardware.Gamepad;
 
 public class GamepadController {
-    private Gamepad gamepad1;
-    private Gamepad gamepad2;
+    private final Gamepad gamepad1;
+    private final Gamepad gamepad2;
 
     public double driver_gamepad_x, driver_gamepad_y, driver_gamepad_rotate;
     public boolean shooter_bumper_left, shooter_bumper_right;

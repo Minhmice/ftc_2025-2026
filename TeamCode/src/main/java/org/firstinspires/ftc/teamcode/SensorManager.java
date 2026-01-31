@@ -8,34 +8,14 @@ public class SensorManager {
         this.robot = robot;
     }
 
-    // --- PHƯƠNG THỨC ĐÃ SỬA ĐỔI: Lấy màu từ một khe cắm cụ thể ---
-    /**
-     * Trả về màu của artifact tại một khe cắm được chỉ định.
-     * @param slotIndex Chỉ số của cảm biến (0, 1, hoặc 2).
-     * @return 1 cho Xanh lá, 2 cho Tím, 0 cho không xác định.
-     */
+    /** Slot không còn đọc màu (color sensor đã bỏ). Luôn trả về 0. */
     public int get_artifact_color(int slotIndex) {
-        // Lấy dữ liệu màu đã được chuẩn hóa từ cảm biến được chỉ định
-        int[] colors = robot.getNormalizedColors(slotIndex);
-        int red = colors[0];
-        int green = colors[1];
-        int blue = colors[2];
-
-        // Ngưỡng phát hiện màu Xanh lá
-        if (green > red && green > blue && green >= 100) {
-            return 1; // 1 là Xanh lá
-        }
-
-        // Ngưỡng phát hiện màu Tím (Đỏ và Xanh dương cùng cao)
-        if (red > green && blue > green) {
-            return 2; // 2 là Tím
-        }
-        
-        return 0; // Không xác định
+        return 0;
     }
 
+    /** IR sensor đã bỏ. Luôn trả về false (không phát hiện bóng). */
     public boolean get_ir_state() {
-        return robot.ir_sensor.getState();
+        return false;
     }
 
     public boolean isTurretAtLeftLimit() {

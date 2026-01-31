@@ -1,161 +1,152 @@
 package org.firstinspires.ftc.teamcode;
 
-import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.util.ElapsedTime;
-import org.firstinspires.ftc.vision.apriltag.AprilTagDetection;
-
-import java.util.List;
 
 /**
- * ArtifactProcessing - TeleOp-safe (non-blocking)
+ * ArtifactProcessing - Sort bóng chỉ theo timing (FIFO), không cảm biến / AprilTag.
  *
- * Slot mapping (per user):
- *  - slot[0] : vị trí bóng vừa được intake vào (cửa vào)
- *  - slot[1] : bên trái slot0 (nhìn theo hướng vào của bóng)
- *  - slot[2] : bên phải slot0 (nhìn theo hướng vào của bóng)
- *
- * Notes:
- *  - KHÔNG dùng while blocking trong TeleOp.
- *  - Mọi rotate đều chạy theo cơ chế "request -> execute khi motor idle".
+ * - slotHasBall[3]: ô 0=intake, 1=trái, 2=phải; cập nhật theo intake (timer), permute khi quay, xóa khi kick.
+ * - Intake: collector chạy >= INTAKE_COMMIT_MS -> slotHasBall[0]=true, request 2 CW giải phóng cửa.
+ * - Bắn: rotate để ô có bóng tới kicker -> half align -> kick -> post half, clear slot.
  */
 public class ArtifactProcessing {
 
     private final RobotHardware robot;
     private final SensorManager sensorManager;
+    private final SortIndexer sortIndexer;
 
-    // 0 = empty/unknown; 1 = green; 2 = purple (theo SensorManager)
-    public int[] artifact_slots = new int[]{0, 0, 0};
+    /** Ô i có bóng hay không (0=intake, 1=trái, 2=phải). Chỉ cập nhật theo hành động. */
+    private final boolean[] slotHasBall = new boolean[]{false, false, false};
 
-    // Queue 3 viên theo artifact_order (0 = none)
-    public int[] artifact_queue = new int[]{0, 0, 0};
+    /** Thời gian collector chạy liên tục để coi 1 bóng đã vào (ms). */
+    public static final long INTAKE_COMMIT_MS = 1000;
 
-    public int artifact_order = 1;
-
-    // Motor tick constants (GoBILDA 5202 series encoder ~537.7 ticks/rev)
-    private static final double GOBILDA_5202_TICKS_PER_REV = 537.7;
-    private static final double DEGREES_PER_TICK = 360.0 / GOBILDA_5202_TICKS_PER_REV;
-
-    // Bạn đang dùng bước 60° (và gọi 2 lần để ra ~120°)
-    private static final int TICKS_FOR_60_DEGREES = (int) Math.round(60.0 / DEGREES_PER_TICK);
-
-    private static final double SORTING_POWER = 1.0;
-
-    // Tolerance để coi motor đã xong (đề phòng isBusy() không nhả đúng)
-    private static final int POSITION_TOLERANCE_TICKS = 10;
-
-    // Debounce intake
-    private static final long INTAKE_LATCH_TIMEOUT_MS = 800;
-
-    // Pre-shoot timeout (fail-safe)
     private static final long PRE_SHOOT_TIMEOUT_MS = 2000;
 
-    // Public telemetry flag (giữ nguyên thói quen dùng từ Main)
     public boolean sorting_busy = false;
 
-    // Intake latch
-    private boolean intakeLatched = false;
+    /** Collector đang chạy (Main gọi setCollectorRunning khi Circle hold/release). */
+    private boolean collectorRunning = false;
     private final ElapsedTime intakeTimer = new ElapsedTime(ElapsedTime.Resolution.MILLISECONDS);
 
-    // Rotation request
-    private int pendingSteps = 0; // each step = 60 deg
+    private int pendingSteps = 0;
     private boolean pendingClockwise = true;
 
-    // Pre-shoot state machine
-    private enum ShootState { IDLE, ALIGNING_TO_SLOT1, ROTATE_TO_SHOOT_POS, READY_TO_KICK, POST_ROTATE_BACK, POST_WAIT }
+    /** Sau khi gửi rotation tới SortIndexer, ghi nhận để permute slotHasBall khi xong. */
+    private int pendingPermuteSteps = 0;
+    private boolean pendingPermuteCW = true;
+    /** Rotation vừa gửi là của chuỗi bắn (ROTATE_TO_KICKER); chỉ khi đó mới chuyển HALF_ALIGN + half khi xong. */
+    private boolean pendingPermuteWasForShoot = false;
+    /** Được set true chỉ khi processShootState (ROTATE_TO_KICKER) gọi requestRotate; processRotationRequest đọc rồi gán pendingPermuteWasForShoot. */
+    private boolean rotationRequestedFromShoot = false;
+
+    private enum ShootState { IDLE, ROTATE_TO_KICKER, HALF_ALIGN, READY_TO_KICK, POST_ROTATE_BACK, POST_WAIT }
     private ShootState shootState = ShootState.IDLE;
     private final ElapsedTime shootTimer = new ElapsedTime(ElapsedTime.Resolution.MILLISECONDS);
+
+    /** Đã request half trong POST_ROTATE_BACK để tránh lặp. */
+    private boolean postHalfRequested = false;
+
+    /** Dpad Left held (Main set mỗi frame). */
+    private boolean dpadLeftHeld = false;
+    /** Dpad Right pressed edge (Main gọi requestDpadRight60 một lần). */
+    private boolean dpadRightRequested = false;
 
     public ArtifactProcessing(RobotHardware robot, SensorManager sensorManager) {
         this.robot = robot;
         this.sensorManager = sensorManager;
-
-        // Ensure sorting motor mode is valid for RUN_TO_POSITION
-        robot.motor_sorting.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        robot.motor_sorting.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
-        robot.motor_sorting.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        this.sortIndexer = new SortIndexer(robot.servo_sort);
     }
 
-    /** Call mỗi vòng lặp TeleOp */
+    /** Main gọi khi Circle hold (true) / release (false). */
+    public void setCollectorRunning(boolean running) {
+        if (running && !collectorRunning) intakeTimer.reset();
+        collectorRunning = running;
+    }
+
+    /** Main gọi mỗi frame khi đọc gamepad (Dpad Left held). */
+    public void setDpadLeftHeld(boolean held) {
+        dpadLeftHeld = held;
+    }
+
+    /** Main gọi một lần khi nhấn Dpad Right (edge). */
+    public void requestDpadRight60() {
+        dpadRightRequested = true;
+    }
+
     public void update() {
-        update_artifact_slot();
+        sortIndexer.setDpadLeftHeld(dpadLeftHeld);
+        if (dpadRightRequested) {
+            sortIndexer.requestDpadRight60();
+            dpadRightRequested = false;
+        }
+        sortIndexer.update();
 
-        // Update motor busy state (safe idle detection)
-        sorting_busy = !isSortingIdle();
-
-        // Intake logic (non-blocking)
-        handleIntakeLatch();
-
-        // Execute pending rotation if any
+        applyPermuteWhenRotationDone();
+        handleIntakeTiming();
         processRotationRequest();
-
-        // Execute shooting state machine if requested
         processShootState();
+
+        sorting_busy = !isSortingIdle();
     }
 
-    // ----------------------------
-    // Tag order / queue
-    // ----------------------------
-
-    public void determine_artifact_order_from_tags() {
-        List<AprilTagDetection> detections = robot.april_tag.getDetections();
-        if (detections != null && !detections.isEmpty()) {
-            for (AprilTagDetection tag : detections) {
-                if (tag.id == 21) { artifact_order = 1; return; }
-                if (tag.id == 22) { artifact_order = 2; return; }
-                if (tag.id == 23) { artifact_order = 3; return; }
-            }
-        }
-    }
-    public void set_artifact_queue_from_order() {
-        if (artifact_order == 1) init_artifact_queue(1, 2, 2);
-        else if (artifact_order == 3) init_artifact_queue(2, 2, 1);
-        else init_artifact_queue(2, 1, 2);
-    }
-
-    private void init_artifact_queue(int a1, int a2, int a3) {
-        artifact_queue[0] = a1;
-        artifact_queue[1] = a2;
-        artifact_queue[2] = a3;
-    }
-
-    /** Sau khi bắn xong 1 viên, đẩy queue lên */
-    public void advance_queue_after_shot() {
-        artifact_queue[0] = artifact_queue[1];
-        artifact_queue[1] = artifact_queue[2];
-        artifact_queue[2] = 0;
-    }
-
-    // ----------------------------
-    // Slots / sensors
-    // ----------------------------
-
-    public void update_artifact_slot() {
-        for (int i = 0; i <= 2; i++) {
-            artifact_slots[i] = sensorManager.get_artifact_color(i);
+    private void applyPermuteWhenRotationDone() {
+        if (!sortIndexer.isIdle() || pendingPermuteSteps <= 0) return;
+        permuteSlotHasBall(pendingPermuteSteps, pendingPermuteCW);
+        boolean wasForShoot = pendingPermuteWasForShoot;
+        pendingPermuteSteps = 0;
+        pendingPermuteWasForShoot = false;
+        if (wasForShoot && shootState == ShootState.ROTATE_TO_KICKER) {
+            shootState = ShootState.HALF_ALIGN;
+            requestRotateHalf(true);
         }
     }
 
-    /** Bản sao 3 slot artifact (0=empty, 1=green, 2=purple). */
+    /** 1 CW: new[i] = old[(i-1+3)%3]. N CW: new[i] = old[(i-N+3)%3] (mod 3). */
+    private void permuteSlotHasBall(int steps, boolean cw) {
+        int shift = cw ? ((3 - steps % 3) % 3) : (steps % 3);
+        if (shift == 0) return;
+        boolean[] old = new boolean[]{slotHasBall[0], slotHasBall[1], slotHasBall[2]};
+        for (int i = 0; i < 3; i++)
+            slotHasBall[i] = old[(i + shift) % 3];
+    }
+
+    private void handleIntakeTiming() {
+        if (!collectorRunning) return;
+        if (intakeTimer.milliseconds() < INTAKE_COMMIT_MS) return;
+        slotHasBall[0] = true;
+        intakeTimer.reset();
+        if (isShootIdle()) requestRotate(true, 2);
+    }
+
+    public boolean isShootIdle() {
+        return shootState == ShootState.IDLE;
+    }
+
+    public int getBallCount() {
+        int n = 0;
+        for (int i = 0; i < 3; i++) if (slotHasBall[i]) n++;
+        return n;
+    }
+
+    public boolean hasBallToShoot() {
+        return getBallCount() > 0;
+    }
+
+    /** Slots 0/1 (có bóng hay không). */
     public int[] getArtifactSlots() {
-        return new int[]{artifact_slots[0], artifact_slots[1], artifact_slots[2]};
+        return new int[]{
+                slotHasBall[0] ? 1 : 0,
+                slotHasBall[1] ? 1 : 0,
+                slotHasBall[2] ? 1 : 0
+        };
     }
 
-    /** Bản sao hàng đợi artifact (thứ tự chuẩn bị bắn). */
+    /** FIFO: queue[0]=1 nếu còn bóng để bắn. */
     public int[] getArtifactQueue() {
-        return new int[]{artifact_queue[0], artifact_queue[1], artifact_queue[2]};
+        int b = hasBallToShoot() ? 1 : 0;
+        return new int[]{b, 0, 0};
     }
-
-    private int find_artifact(int color) {
-        if (color == 0) return -1;
-        for (int i = 0; i <= 2; i++) {
-            if (artifact_slots[i] == color) return i;
-        }
-        return -1;
-    }
-
-    // ----------------------------
-    // Collector
-    // ----------------------------
 
     public void run_collector() {
         robot.motor_collector.setPower(1);
@@ -165,58 +156,16 @@ public class ArtifactProcessing {
         robot.motor_collector.setPower(0);
     }
 
-    // ----------------------------
-    // Intake handling
-    // ----------------------------
-
-    private void handleIntakeLatch() {
-        boolean ir = sensorManager.get_ir_state();
-
-        // Start latch when IR sees something AND slot0 is currently empty
-        if (ir && !intakeLatched && artifact_slots[0] == 0) {
-            intakeLatched = true;
-            intakeTimer.reset();
-        }
-
-        if (!ir) {
-            // reset latch when beam clears
-            intakeLatched = false;
-            return;
-        }
-
-        if (intakeLatched) {
-            // If a ball is now detected at slot0 -> index/rotate to free intake
-            if (artifact_slots[0] != 0) {
-                // Move to next slot (120° = 2*60°) only when motor idle and not in shooting
-                if (shootState == ShootState.IDLE) {
-                    requestRotate(true, 2, SORTING_POWER);
-                }
-                intakeLatched = false;
-                return;
-            }
-
-            // Fail-safe: if latch too long, release
-            if (intakeTimer.milliseconds() > INTAKE_LATCH_TIMEOUT_MS) {
-                intakeLatched = false;
-            }
-        }
+    public void requestManualRotate(boolean clockwise, int steps) {
+        requestRotate(clockwise, steps);
     }
 
-    // ----------------------------
-    // Rotation
-    // ----------------------------
-
-    /**
-     * Request rotate in steps (each step = 60 degrees).
-     * Will execute only when motor is idle.
-     */
-    private void requestRotate(boolean clockwise, int steps, double power) {
+    private void requestRotate(boolean clockwise, int steps) {
         if (steps <= 0) return;
         if (pendingSteps == 0) {
             pendingClockwise = clockwise;
             pendingSteps = steps;
         } else {
-            // If same direction, accumulate, else override (simple + predictable)
             if (pendingClockwise == clockwise) pendingSteps += steps;
             else {
                 pendingClockwise = clockwise;
@@ -227,131 +176,103 @@ public class ArtifactProcessing {
 
     private void processRotationRequest() {
         if (pendingSteps <= 0) return;
-
-        if (isSortingIdle()) {
-            rotate_steps(pendingClockwise, pendingSteps, SORTING_POWER);
-            pendingSteps = 0;
-        }
-    }
-
-    private void rotate_steps(boolean clockwise, int steps, double power) {
-        int direction = clockwise ? 1 : -1;
-        int currentPosition = robot.motor_sorting.getCurrentPosition();
-        int targetPosition = currentPosition + (direction * steps * TICKS_FOR_60_DEGREES);
-
-        robot.motor_sorting.setTargetPosition(targetPosition);
-        robot.motor_sorting.setMode(DcMotor.RunMode.RUN_TO_POSITION);
-        robot.motor_sorting.setPower(Math.abs(power));
+        if (!isSortingIdle()) return;
+        pendingPermuteSteps = pendingSteps;
+        pendingPermuteCW = pendingClockwise;
+        pendingPermuteWasForShoot = rotationRequestedFromShoot;
+        rotationRequestedFromShoot = false;
+        sortIndexer.requestRotate(pendingClockwise, pendingSteps);
+        pendingSteps = 0;
     }
 
     private boolean isSortingIdle() {
-        if (robot.motor_sorting.getMode() != DcMotor.RunMode.RUN_TO_POSITION) return true;
-
-        if (!robot.motor_sorting.isBusy()) return true;
-
-        int err = Math.abs(robot.motor_sorting.getTargetPosition() - robot.motor_sorting.getCurrentPosition());
-        return err <= POSITION_TOLERANCE_TICKS;
+        return sortIndexer.isIdle();
     }
 
-    // ----------------------------
-    // Shooting sequence (TeleOp)
-    // ----------------------------
+    private void requestRotateHalf(boolean clockwise) {
+        sortIndexer.requestRotateHalf(clockwise);
+    }
 
-    /** Start pre-shoot sequence (non-blocking). */
     public void start_pre_shoot() {
         if (shootState != ShootState.IDLE) return;
-        if (artifact_queue[0] == 0) return;
-
-        shootState = ShootState.ALIGNING_TO_SLOT1;
+        if (!hasBallToShoot()) return;
+        shootState = ShootState.ROTATE_TO_KICKER;
         shootTimer.reset();
     }
 
-    /** True when wheel is at "ready to kick" position */
     public boolean is_ready_to_kick() {
         return shootState == ShootState.READY_TO_KICK;
     }
 
-    /** Request rotate back after kick (non-blocking). */
     public void request_post_shoot() {
         if (shootState != ShootState.READY_TO_KICK) return;
         shootState = ShootState.POST_ROTATE_BACK;
+        postHalfRequested = false;
         shootTimer.reset();
     }
 
     private void processShootState() {
         if (shootState == ShootState.IDLE) return;
-
-        // Fail-safe timeout
         if (shootTimer.milliseconds() > PRE_SHOOT_TIMEOUT_MS) {
             shootState = ShootState.IDLE;
             return;
         }
-
-        // Wait motor finish before deciding next
         if (!isSortingIdle()) return;
 
-        int targetColor = artifact_queue[0];
-        if (targetColor == 0) {
+        int k = sortIndexer.getCurrentSlot();
+        if (!hasBallToShoot()) {
             shootState = ShootState.IDLE;
             return;
         }
 
         switch (shootState) {
-            case ALIGNING_TO_SLOT1: {
-                // Goal: artifact_slots[1] == targetColor
-                if (artifact_slots[1] == targetColor) {
-                    shootState = ShootState.ROTATE_TO_SHOOT_POS;
-                    // rotate 60° clockwise into shoot position (the same as your old code)
-                    requestRotate(true, 1, SORTING_POWER);
-                    return;
-                }
-
-                // If not in slot1, move it into slot1 using 120° (2*60°) like your old move_to_artifact_slot()
-                int slot = find_artifact(targetColor);
-                if (slot == -1) {
-                    // not found: stop sequence
-                    shootState = ShootState.IDLE;
-                    return;
-                }
-
-                if (slot == 0) {
-                    requestRotate(true, 2, SORTING_POWER);
-                } else if (slot == 2) {
-                    requestRotate(false, 2, SORTING_POWER);
+            case ROTATE_TO_KICKER:
+                if (slotHasBall[k]) {
+                    shootState = ShootState.HALF_ALIGN;
+                    requestRotateHalf(true);
                 } else {
-                    // slot == 1 handled above
+                    int stepsCW = -1, stepsCCW = -1;
+                    for (int s = 1; s <= 2; s++) {
+                        if (slotHasBall[(k + s) % 3]) { stepsCW = s; break; }
+                    }
+                    for (int s = 1; s <= 2; s++) {
+                        if (slotHasBall[(k - s + 3) % 3]) { stepsCCW = s; break; }
+                    }
+                    if (stepsCW < 0 && stepsCCW < 0) {
+                        shootState = ShootState.IDLE;
+                        return;
+                    }
+                    if (stepsCW >= 0 && (stepsCCW < 0 || stepsCW <= stepsCCW)) {
+                        rotationRequestedFromShoot = true;
+                        requestRotate(true, stepsCW);
+                    } else {
+                        rotationRequestedFromShoot = true;
+                        requestRotate(false, stepsCCW);
+                    }
                 }
                 return;
-            }
 
-            case ROTATE_TO_SHOOT_POS: {
-                // After the 60° rotation completes, we are ready
-                // If there is no pending rotation and motor is idle => ready
-                if (pendingSteps == 0 && isSortingIdle()) {
-                    shootState = ShootState.READY_TO_KICK;
-                }
+            case HALF_ALIGN:
+                if (isSortingIdle()) shootState = ShootState.READY_TO_KICK;
                 return;
-            }
 
             case READY_TO_KICK:
-                // Wait for Main to call request_post_shoot() after kicker finishes
                 return;
 
-            case POST_ROTATE_BACK: {
-                // Rotate back 60° counter-clockwise (same as your post_shoot())
-                requestRotate(false, 1, SORTING_POWER);
-                shootState = ShootState.POST_WAIT;
+            case POST_ROTATE_BACK:
+                if (!postHalfRequested) {
+                    requestRotateHalf(false);
+                    postHalfRequested = true;
+                    shootState = ShootState.POST_WAIT;
+                }
                 return;
-            }
 
-            case POST_WAIT: {
-                // Wait until the rotate-back finishes, then advance queue and go idle
-                if (pendingSteps == 0 && isSortingIdle()) {
-                    advance_queue_after_shot();
+            case POST_WAIT:
+                if (isSortingIdle()) {
+                    slotHasBall[sortIndexer.getCurrentSlot()] = false;
                     shootState = ShootState.IDLE;
                 }
                 return;
-            }
 
             default:
                 shootState = ShootState.IDLE;

@@ -10,8 +10,8 @@ public class TagProcessing {
     private double range;
     private double distanceToCenter = -1;
 
-    // VisionPortal defaults to 640x480; half-width = 320px
-    private static final double IMAGE_HALF_WIDTH_PX = 320.0;
+    // Theo em Vinh: 480px width => half = 240
+    private static final double IMAGE_HALF_WIDTH_PX = 240.0;
 
     /** AprilTag ID cho đội đỏ (team_color == 1). */
     private static final int TAG_ID_RED = 24;

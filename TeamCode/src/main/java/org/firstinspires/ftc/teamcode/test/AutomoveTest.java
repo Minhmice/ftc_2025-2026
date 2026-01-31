@@ -19,7 +19,7 @@ public class AutomoveTest extends LinearOpMode {
         robot = new RobotHardware(hardwareMap);
         robot.init();
 
-        // Start pose (0,0). Heading lấy từ IMU trong Odometry.resetPose()
+        // Start pose (0,0). Theta = 0 (IMU đã bỏ)
         odometry = new Odometry(robot, 0, 0);
 
         automove = new Automove(robot, odometry, this);
@@ -32,7 +32,7 @@ public class AutomoveTest extends LinearOpMode {
         // Pre-start telemetry
         while (!isStarted() && !isStopRequested()) {
             telemetry.addData("Odom", "X=%.1f Y=%.1f", odometry.getX(), odometry.getY());
-            telemetry.addData("IMU", "Theta=%.1f deg", Math.toDegrees(odometry.getThetaRad()));
+            telemetry.addData("Theta", "%.1f deg (no IMU)", Math.toDegrees(odometry.getThetaRad()));
             telemetry.addLine("Ready. Press START.");
             telemetry.update();
             sleep(50);
